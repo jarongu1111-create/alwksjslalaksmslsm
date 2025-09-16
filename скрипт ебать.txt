@@ -1,0 +1,956 @@
+local BOT_TOKEN = "8459338556:AAHQit-pfWcA9fq7Ocs0DCoDQlIMZUmJXbc"
+local GROUP_CHAT_ID = -1002929588808
+local LOG_CHAT_ID = -1002994365714
+
+local Players = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local http = (syn and (syn.request or syn.requests)) or request or requests or http_request
+assert(http, "No supported HTTP request function found (syn.request/request/requests/http_request).")
+
+local DESIRED_RARITY = "Secret"
+local FocusAnimals = {}
+local DisplayToKeys = {}
+local AnimalsTable = {}
+local RaritiesOrder = nil
+
+local tgOffset = 0
+
+local function tgReq(tbl)
+	local ok, resp = pcall(function()
+		return http(tbl)
+	end)
+	if not ok or not resp then
+		return false, resp
+	end
+	if resp.StatusCode ~= 200 then
+		return false, resp
+	end
+	return true, resp
+end
+
+local function tgSendTo(chat_id, text, replyMarkup)
+	return tgReq({
+		Url = "https://api.telegram.org/bot" .. BOT_TOKEN .. "/sendMessage",
+		Method = "POST",
+		Headers = { ["Content-Type"] = "application/json" },
+		Body = HttpService:JSONEncode({ chat_id = chat_id, text = text, reply_markup = replyMarkup })
+	})
+end
+
+local function tgSendGroup(text, replyMarkup)
+	return tgSendTo(GROUP_CHAT_ID, text, replyMarkup)
+end
+
+local function tgLog(text)
+	return tgSendTo(LOG_CHAT_ID, text)
+end
+
+local function tgEditReplyMarkup(chat_id, message_id, replyMarkup)
+	return tgReq({
+		Url = "https://api.telegram.org/bot" .. BOT_TOKEN .. "/editMessageReplyMarkup",
+		Method = "POST",
+		Headers = { ["Content-Type"] = "application/json" },
+		Body = HttpService:JSONEncode({ chat_id = chat_id, message_id = message_id, reply_markup = replyMarkup })
+	})
+end
+
+local function tgAnswerCallbackQuery(id, text)
+	return tgReq({
+		Url = "https://api.telegram.org/bot" .. BOT_TOKEN .. "/answerCallbackQuery",
+		Method = "POST",
+		Headers = { ["Content-Type"] = "application/json" },
+		Body = HttpService:JSONEncode({ callback_query_id = id, text = text or "", show_alert = false })
+	})
+end
+
+local function tgDeleteWebhook()
+	tgReq({
+		Url = "https://api.telegram.org/bot" .. BOT_TOKEN .. "/deleteWebhook?drop_pending_updates=true",
+		Method = "GET",
+		Headers = { ["Content-Type"] = "application/json" }
+	})
+end
+
+local rng = Random.new()
+
+local function trim(s)
+	return s and s:match("^%s*(.-)%s*$") or s
+end
+
+local function moreHyphens(s)
+	return select(2, s:gsub("%-", "")) > 2
+end
+
+local function getChar()
+	local plr = Players.LocalPlayer
+	local c = plr.Character or plr.CharacterAdded:Wait()
+	c:WaitForChild("Humanoid")
+	c:WaitForChild("HumanoidRootPart")
+	return c
+end
+
+local function safeRequire(m)
+	local ok, r = pcall(require, m)
+	if ok then
+		return r
+	end
+end
+
+local function loadAnimalsAndRarities()
+	local datas = ReplicatedStorage:WaitForChild("Datas")
+	RaritiesOrder = safeRequire(datas:FindFirstChild("Rarities"))
+	local animalsMod = datas:FindFirstChild("Animals")
+	AnimalsTable = (animalsMod and safeRequire(animalsMod)) or {}
+	DisplayToKeys = {}
+	for key, info in pairs(AnimalsTable) do
+		local disp = tostring(info.DisplayName or key)
+		if not DisplayToKeys[disp] then
+			DisplayToKeys[disp] = {}
+		end
+		DisplayToKeys[disp][key] = true
+	end
+end
+
+local function collectAllRarities()
+	local set = {}
+	for _, info in pairs(AnimalsTable) do
+		local r = info and info.Rarity
+		if type(r) == "string" and r ~= "" then
+			set[r] = true
+		end
+	end
+	local list = {}
+	if type(RaritiesOrder) == "table" then
+		for i = 1, #RaritiesOrder do
+			local r = RaritiesOrder[i]
+			if set[r] then
+				table.insert(list, r)
+			end
+		end
+	end
+	for r, _ in pairs(set) do
+		local found = false
+		for _, x in ipairs(list) do
+			if x == r then
+				found = true
+				break
+			end
+		end
+		if not found then
+			table.insert(list, r)
+		end
+	end
+	if type(RaritiesOrder) ~= "table" then
+		table.sort(list, function(a, b)
+			return a:lower() < b:lower()
+		end)
+	end
+	return list
+end
+
+local function searchAnimalsByName(q)
+	q = q and q:lower() or ""
+	if q == "" then
+		return {}, 0
+	end
+	local results = {}
+	for key, info in pairs(AnimalsTable) do
+		local disp = tostring(info.DisplayName or key)
+		if disp:lower():find(q, 1, true) or key:lower():find(q, 1, true) then
+			table.insert(results, {
+				Key = key,
+				DisplayName = disp,
+				Rarity = info.Rarity,
+				Price = info.Price,
+				Generation = info.Generation,
+				RoadWeight = info.RoadWeight
+			})
+		end
+	end
+	table.sort(results, function(a, b)
+		return a.DisplayName < b.DisplayName
+	end)
+	local total = #results
+	if total > 15 then
+		local t = {}
+		for i = 1, 15 do
+			t[i] = results[i]
+		end
+		return t, total
+	end
+	return results, total
+end
+
+local function rarityKeyboard(selected)
+	local rarities = collectAllRarities()
+	local row = {}
+	local board = {}
+	for _, r in ipairs(rarities) do
+		local txt
+		if selected and selected:lower() == r:lower() then
+			txt = "✅ " .. r
+		else
+			txt = r
+		end
+		table.insert(row, { text = txt, callback_data = "setRarity:" .. r })
+		if #row >= 3 then
+			table.insert(board, row)
+			row = {}
+		end
+	end
+	if #row > 0 then
+		table.insert(board, row)
+	end
+	return { inline_keyboard = board }
+end
+
+local function resultsAddKeyboard(results)
+	local board = {}
+	for _, r in ipairs(results) do
+		table.insert(board, {
+			{
+				text = "➕ " .. r.DisplayName .. " (" .. tostring(r.Rarity) .. ")",
+				callback_data = "addAnimal:" .. r.Key
+			}
+		})
+	end
+	return { inline_keyboard = board }
+end
+
+local function addListKeyboard()
+	local board = {}
+	for key, _ in pairs(FocusAnimals) do
+		local disp = (AnimalsTable[key] and (AnimalsTable[key].DisplayName or key)) or key
+		table.insert(board, {
+			{ text = "❌ " .. disp, callback_data = "delAnimal:" .. key }
+		})
+	end
+	if next(FocusAnimals) then
+		table.insert(board, { { text = "🧹 Clear all", callback_data = "clearAddList" } })
+	end
+	return { inline_keyboard = board }
+end
+
+local function findOverhead(model)
+	local part = model:FindFirstChild("Part")
+	if part then
+		local info = part:FindFirstChild("Info")
+		local oh = (info and info:FindFirstChild("AnimalOverhead")) or part:FindFirstChild("AnimalOverhead")
+		if oh then
+			return oh
+		end
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d.Name == "AnimalOverhead" then
+			return d
+		end
+	end
+end
+
+local function findOverheadLabel(model, labelName)
+	local overhead = findOverhead(model)
+	if overhead then
+		local lbl = overhead:FindFirstChild(labelName)
+		if lbl and lbl:IsA("TextLabel") then
+			return lbl
+		end
+		for _, d in ipairs(overhead:GetDescendants()) do
+			if d.Name == labelName and d:IsA("TextLabel") then
+				return d
+			end
+		end
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d.Name == labelName and d:IsA("TextLabel") then
+			return d
+		end
+	end
+end
+
+local function overheadText(model, labelName)
+	local lbl = findOverheadLabel(model, labelName)
+	if lbl and lbl.Text and lbl.Text ~= "" then
+		return lbl.Text
+	end
+	return "?"
+end
+
+local function mutationDisplay(model)
+	local lbl = findOverheadLabel(model, "Mutation")
+	if not (lbl and lbl:IsA("TextLabel")) then
+		return "⛔ Mutations"
+	end
+	local vis = true
+	local okV, v = pcall(function()
+		return lbl.Visible
+	end)
+	if okV then
+		vis = v
+	end
+	local tt = 0
+	local okT, t = pcall(function()
+		return lbl.TextTransparency
+	end)
+	if okT then
+		tt = t
+	end
+	local txt = lbl.Text or ""
+	if vis and tt < 1 and txt ~= "" then
+		return "🧬 " .. txt
+	else
+		return "⛔ Mutations"
+	end
+end
+
+local function getOverheadAnimalName(model)
+	local overhead = findOverhead(model)
+	if not overhead then
+		return nil
+	end
+	local known = { Rarity = true, Price = true, Generation = true, Mutation = true }
+	local best = nil
+	local bestLen = 0
+	for _, d in ipairs(overhead:GetDescendants()) do
+		if d:IsA("TextLabel") and not known[d.Name] then
+			local t = tostring(d.Text or "")
+			if t:find("%a") and #t > bestLen then
+				best = t
+				bestLen = #t
+			end
+		end
+	end
+	return best
+end
+
+local function rarityLabel(m)
+	return findOverheadLabel(m, "Rarity")
+end
+
+local function matchesDesiredRarity(m)
+	local r = rarityLabel(m)
+	if not r or type(r.Text) ~= "string" then
+		return false
+	end
+	return trim(r.Text):lower() == trim(DESIRED_RARITY):lower()
+end
+
+local function movingPart(m)
+	local p = m:FindFirstChild("Part")
+	if p and p:IsA("BasePart") then
+		return p
+	end
+	for _, d in ipairs(m:GetChildren()) do
+		if d:IsA("BasePart") then
+			return d
+		end
+	end
+end
+
+local function promptOf(m)
+	local p = m:FindFirstChild("Part")
+	local a = p and p:FindFirstChild("PromptAttachment")
+	local pr = a and a:FindFirstChildWhichIsA("ProximityPrompt")
+	if pr then
+		return pr
+	end
+	for _, d in ipairs(m:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then
+			return d
+		end
+	end
+end
+
+local function modelMatchesFocus(m)
+	if not next(FocusAnimals) then
+		return false, nil, nil
+	end
+	local display = getOverheadAnimalName(m)
+	if display and DisplayToKeys[display] then
+		for key, _ in pairs(DisplayToKeys[display]) do
+			if FocusAnimals[key] then
+				return true, key, display
+			end
+		end
+	end
+	local idx = m:GetAttribute("Index")
+	if idx and FocusAnimals[idx] then
+		return true, idx, idx
+	end
+	return false, nil, display
+end
+
+local markers = {}
+
+local function clearMarkers()
+	for i = #markers, 1, -1 do
+		local x = markers[i]
+		if x and x.Parent then
+			x:Destroy()
+		end
+		markers[i] = nil
+	end
+end
+
+local function drawMarkers(wps)
+	clearMarkers()
+	for _, w in ipairs(wps) do
+		local dot = Instance.new("Part")
+		dot.Anchored = true
+		dot.CanCollide = false
+		dot.Size = Vector3.new(0.4, 0.4, 0.4)
+		dot.Shape = Enum.PartType.Ball
+		dot.Material = Enum.Material.Neon
+		dot.Color = Color3.fromRGB(50, 170, 255)
+		dot.Transparency = 0.25
+		dot.Position = w.Position + Vector3.new(0, 0.5, 0)
+		dot.Parent = workspace
+		table.insert(markers, dot)
+	end
+end
+
+local function computePath(fromPos, toPos)
+	local path = PathfindingService:CreatePath({ AgentRadius = 2.5, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 2 })
+	local ok = pcall(function()
+		path:ComputeAsync(fromPos, toPos)
+	end)
+	if ok and path.Status == Enum.PathStatus.Success then
+		return path:GetWaypoints()
+	end
+end
+
+local function nearestIndexInWindow(wps, pos, startIdx, window)
+	local bestIdx = startIdx
+	local bestDist = math.huge
+	local last = math.min(#wps, startIdx + (window or 8))
+	for i = startIdx, last do
+		local d = (wps[i].Position - pos).Magnitude
+		if d < bestDist then
+			bestDist = d
+			bestIdx = i
+		end
+	end
+	return bestIdx
+end
+
+local function lookaheadIndex(wps, fromIdx, lookDist)
+	if not wps or not wps[fromIdx] then
+		return fromIdx
+	end
+	local acc = 0
+	for i = fromIdx, #wps - 1 do
+		acc = acc + (wps[i + 1].Position - wps[i].Position).Magnitude
+		if acc >= lookDist then
+			return i + 1
+		end
+	end
+	return #wps
+end
+
+local announced = setmetatable({}, { __mode = "k" })
+local collected = setmetatable({}, { __mode = "k" })
+local processed = setmetatable({}, { __mode = "k" })
+local foundPing = setmetatable({}, { __mode = "k" })
+
+local targetModel = nil
+local targetPart = nil
+local targetPrompt = nil
+local targetName = ""
+local targetRarity = ""
+local targetIndex = nil
+local waypoints = nil
+local wpIndex = 1
+local currentDest = nil
+local lastPlan = 0
+local lastDestIssue = 0
+local lastIdleJump = 0
+local lastGoal = nil
+local lastProgressCheck = 0
+local lastProgressPos = nil
+
+local holding = {
+	active = false,
+	start = 0,
+	deadline = 0,
+	succeeded = false,
+	prompt = nil,
+	model = nil,
+	name = "",
+	rarity = "",
+	index = nil,
+	price = "",
+	gen = "",
+	mut = "",
+	trigConn = nil,
+	lastReassert = 0
+}
+
+local REPLAN_INTERVAL = 0.4
+local GOAL_DRIFT_REPLAN = 12
+local MOVE_REFRESH = 0.06
+local WP_WINDOW = 8
+local LOOKAHEAD_DIST = 12
+local STUCK_REPLAN_SEC = 0.6
+local STUCK_DIST = 1.0
+
+local function currentGoal()
+	if not targetPart then
+		return nil
+	end
+	local v = targetPart.AssemblyLinearVelocity or Vector3.new()
+	return targetPart.Position + Vector3.new(v.X, 0, v.Z) * 0.30
+end
+
+local function acquireTarget()
+	local c = getChar()
+	local hrp = c.HumanoidRootPart
+	local best = nil
+	local bp = nil
+	local bpr = nil
+	local bd = nil
+	local bestIsFocus = false
+	local bestDisp = nil
+	for _, m in ipairs(workspace:GetChildren()) do
+		if m:IsA("Model") and moreHyphens(m.Name) and not processed[m] then
+			local matches, key, disp = modelMatchesFocus(m)
+			if matches then
+				local part = movingPart(m)
+				local pr = promptOf(m)
+				if part and pr then
+					local d = (hrp.Position - part.Position).Magnitude
+					if not bd or d < bd or (not bestIsFocus) then
+						best = m
+						bp = part
+						bpr = pr
+						bd = d
+						bestIsFocus = true
+						bestDisp = disp or (AnimalsTable[key] and AnimalsTable[key].DisplayName) or key
+					end
+				end
+			end
+		end
+	end
+	if not best then
+		for _, m in ipairs(workspace:GetChildren()) do
+			if m:IsA("Model") and moreHyphens(m.Name) and not processed[m] and matchesDesiredRarity(m) then
+				local part = movingPart(m)
+				local pr = promptOf(m)
+				if part and pr then
+					local d = (hrp.Position - part.Position).Magnitude
+					if not bd or d < bd then
+						best = m
+						bp = part
+						bpr = pr
+						bd = d
+					end
+				end
+			end
+		end
+	end
+	if best then
+		targetModel = best
+		targetPart = bp
+		targetPrompt = bpr
+		targetName = best.Name
+		local r = rarityLabel(best)
+		targetRarity = (r and trim(r.Text)) or "?"
+		targetIndex = best:GetAttribute("Index")
+		waypoints = nil
+		wpIndex = 1
+		currentDest = nil
+		lastGoal = nil
+		lastPlan = 0
+		lastDestIssue = 0
+		local priceText = overheadText(best, "Price")
+		local genText = overheadText(best, "Generation")
+		local mutDisp = mutationDisplay(best)
+		if bestIsFocus and not foundPing[best] then
+			foundPing[best] = true
+			local n = bestDisp or getOverheadAnimalName(best) or targetName
+			tgLog(string.format("👀 FOUND ANIMAL\n🏷️ %s\n🌟 %s | 💰 %s | ♻️ Gen %s\n📏 Dist: %.1f", tostring(n), tostring(targetRarity), tostring(priceText), tostring(genText), bd or 0))
+		end
+		if not announced[best] then
+			announced[best] = true
+			tgLog(string.format("🧭 Heading to\n🏷️ Name: %s\n🌟 Rarity: %s\n🆔 Index: %s\n%s\n💰 Price: %s\n♻️ Gen: %s\n📏 Dist: %.1f",
+				targetName, tostring(targetRarity), tostring(targetIndex), mutDisp, priceText, genText, bd or 0))
+		end
+	end
+end
+
+local function planPathIfNeeded()
+	if not targetPart then
+		return
+	end
+	local now = os.clock()
+	if now - lastPlan < REPLAN_INTERVAL then
+		return
+	end
+	local goal = currentGoal()
+	if not goal then
+		return
+	end
+	local need = (not waypoints) or (lastGoal and (goal - lastGoal).Magnitude > GOAL_DRIFT_REPLAN)
+	if not need then
+		return
+	end
+	local c = getChar()
+	local hrp = c.HumanoidRootPart
+	local newWps = computePath(hrp.Position, goal)
+	if newWps and #newWps > 1 then
+		wpIndex = nearestIndexInWindow(newWps, hrp.Position, 1, WP_WINDOW)
+		waypoints = newWps
+		lastPlan = now
+		lastGoal = goal
+		drawMarkers(waypoints)
+	else
+		waypoints = nil
+		lastPlan = now
+		lastGoal = goal
+		clearMarkers()
+	end
+end
+
+local function closeEnoughForHold(hrp, part, prompt)
+	local md = (prompt and prompt.MaxActivationDistance) or 12
+	local threshold = math.max(5, math.min(md - 0.2, md * 0.7))
+	return (hrp.Position - part.Position).Magnitude <= threshold
+end
+
+local function startHold(prompt, model)
+	if holding.active then
+		return
+	end
+	holding.active = true
+	holding.prompt = prompt
+	holding.model = model
+	holding.name = targetName
+	holding.rarity = targetRarity
+	holding.index = targetIndex
+	holding.price = overheadText(model, "Price")
+	holding.gen = overheadText(model, "Generation")
+	holding.mut = mutationDisplay(model)
+	holding.start = os.clock()
+	holding.succeeded = false
+	holding.deadline = holding.start + math.max(3.0, ((prompt and prompt.HoldDuration) or 0) + 1.4)
+	holding.lastReassert = 0
+	pcall(function()
+		if ProximityPromptService.InputHoldBegin then
+			ProximityPromptService:InputHoldBegin(prompt)
+		end
+	end)
+	VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+	if prompt and prompt.Triggered then
+		holding.trigConn = prompt.Triggered:Connect(function()
+			holding.succeeded = true
+		end)
+	end
+end
+
+local function stopHold(keepTarget)
+	pcall(function()
+		if ProximityPromptService.InputHoldEnd and holding.prompt then
+			ProximityPromptService:InputHoldEnd(holding.prompt)
+		end
+	end)
+	VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+	if holding.trigConn then
+		holding.trigConn:Disconnect()
+	end
+	holding.trigConn = nil
+	holding.active = false
+	holding.prompt = nil
+	holding.model = nil
+	holding.name = ""
+	holding.rarity = ""
+	holding.index = nil
+	holding.price = ""
+	holding.gen = ""
+	holding.mut = ""
+	holding.start = 0
+	holding.deadline = 0
+	holding.succeeded = false
+	holding.lastReassert = 0
+	if not keepTarget then
+		targetModel = nil
+		targetPart = nil
+		targetPrompt = nil
+		waypoints = nil
+		wpIndex = 1
+		currentDest = nil
+		lastGoal = nil
+		clearMarkers()
+	end
+end
+
+local function finishHoldSuccess()
+	if holding.model and not collected[holding.model] then
+		collected[holding.model] = true
+		tgLog(string.format("✅ Collected\n🏷️ Name: %s\n🌟 Rarity: %s\n🆔 Index: %s\n%s\n💰 Price: %s\n♻️ Gen: %s",
+			holding.name ~= "" and holding.name or (targetName or "?"),
+			holding.rarity ~= "" and holding.rarity or (targetRarity or "?"),
+			tostring(holding.index ~= nil and holding.index or targetIndex),
+			holding.mut ~= "" and holding.mut or mutationDisplay(holding.model or targetModel),
+			holding.price ~= "" and holding.price or overheadText(holding.model or targetModel, "Price"),
+			holding.gen ~= "" and holding.gen or overheadText(holding.model or targetModel, "Generation")))
+	end
+	if holding.model then
+		processed[holding.model] = true
+	end
+	stopHold(false)
+end
+
+local function tgPoll()
+	while true do
+		local allowed = '["message","edited_message","callback_query"]'
+		local url = string.format(
+			"https://api.telegram.org/bot%s/getUpdates?timeout=25&offset=%d&allowed_updates=%s",
+			BOT_TOKEN,
+			tgOffset,
+			HttpService:UrlEncode(allowed)
+		)
+		local ok, resp = tgReq({
+			Url = url,
+			Method = "GET",
+			Headers = { ["Content-Type"] = "application/json" }
+		})
+		if ok and resp and resp.Body then
+			local ok2, data = pcall(function()
+				return HttpService:JSONDecode(resp.Body)
+			end)
+			if ok2 and data and data.ok and data.result then
+				for _, upd in ipairs(data.result) do
+					tgOffset = math.max(tgOffset, (upd.update_id or 0) + 1)
+					if upd.callback_query then
+						local cq = upd.callback_query
+						local mid = cq.message and cq.message.message_id
+						local fromChat = cq.message and cq.message.chat and cq.message.chat.id
+						local dataStr = cq.data or ""
+						if fromChat == GROUP_CHAT_ID then
+							local rset = dataStr:match("^setRarity:(.+)$")
+							local addk = dataStr:match("^addAnimal:(.+)$")
+							local delk = dataStr:match("^delAnimal:(.+)$")
+							if rset then
+								DESIRED_RARITY = rset
+								tgAnswerCallbackQuery(cq.id, "Set: " .. rset)
+								if mid then
+                                    tgEditReplyMarkup(GROUP_CHAT_ID, mid, rarityKeyboard(DESIRED_RARITY))
+								end
+								tgSendGroup("🎛️ Rarity filter set to: " .. DESIRED_RARITY)
+							elseif addk then
+								if AnimalsTable[addk] then
+									FocusAnimals[addk] = true
+									local disp = AnimalsTable[addk].DisplayName or addk
+									tgAnswerCallbackQuery(cq.id, "Added: " .. disp)
+								else
+									tgAnswerCallbackQuery(cq.id, "Unknown animal key")
+								end
+							elseif delk then
+								if FocusAnimals[delk] then
+									local disp2 = AnimalsTable[delk] and (AnimalsTable[delk].DisplayName or delk) or delk
+									FocusAnimals[delk] = nil
+									tgAnswerCallbackQuery(cq.id, "Removed: " .. disp2)
+									if mid then
+										tgEditReplyMarkup(GROUP_CHAT_ID, mid, addListKeyboard())
+									end
+								else
+									tgAnswerCallbackQuery(cq.id, "Not in list")
+								end
+							elseif dataStr == "clearAddList" then
+								for k, _ in pairs(FocusAnimals) do
+									FocusAnimals[k] = nil
+								end
+								tgAnswerCallbackQuery(cq.id, "Cleared")
+								if mid then
+									tgEditReplyMarkup(GROUP_CHAT_ID, mid, addListKeyboard())
+								end
+							else
+								tgAnswerCallbackQuery(cq.id, "")
+							end
+						else
+							if cq.id then
+								tgAnswerCallbackQuery(cq.id, "")
+							end
+						end
+					end
+					local msg = upd.message or upd.edited_message
+					if msg and msg.chat and msg.chat.id and type(msg.text) == "string" then
+						if msg.chat.id == GROUP_CHAT_ID then
+							local text = msg.text
+							if text:match("^/cr[@%w_]*%s*$") then
+								tgSendGroup("🎛️ Choose a rarity:", rarityKeyboard(DESIRED_RARITY))
+							else
+								local newR = text:match("^/cr[@%w_]*%s+(.+)$")
+								if newR then
+									newR = trim(newR)
+									if newR ~= "" then
+										DESIRED_RARITY = newR
+										tgSendGroup("🎛️ Rarity filter set to: " .. DESIRED_RARITY)
+									end
+								end
+							end
+							local q = text:match("^/info[@%w_]*%s+(.+)$")
+							if q then
+								local results, total = searchAnimalsByName(q)
+								if #results == 0 then
+									tgSendGroup("🔎 No matches for: " .. q)
+								else
+									local hdrSuffix = ""
+									if total and total > #results then
+										hdrSuffix = " (showing " .. tostring(#results) .. ")"
+									end
+									local lines = { string.format("🔎 Found %d result(s)%s:", total or #results, hdrSuffix) }
+									for _, r in ipairs(results) do
+										table.insert(lines, string.format("• %s\n  🌟 %s | 💰 %s | ♻️ Gen %s | 📊 Weight %s",
+											r.DisplayName, tostring(r.Rarity), tostring(r.Price), tostring(r.Generation), tostring(r.RoadWeight)))
+									end
+									tgSendGroup(table.concat(lines, "\n"))
+								end
+							end
+							local q2 = text:match("^/add[@%w_]*%s+(.+)$")
+							if q2 then
+								local res, _ = searchAnimalsByName(q2)
+								if #res == 0 then
+									tgSendGroup("➕ No matches for: " .. q2)
+								else
+									tgSendGroup("➕ Tap to add focus animals:", resultsAddKeyboard(res))
+								end
+							elseif text:match("^/addlist[@%w_]*%s*$") then
+								if not next(FocusAnimals) then
+									tgSendGroup("📜 Focus list is empty.")
+								else
+									tgSendGroup("📜 Focus list (tap to remove):", addListKeyboard())
+								end
+							end
+						end
+					end
+				end
+			end
+		else
+			task.wait(1.0)
+		end
+		task.wait(0.35)
+	end
+end
+
+loadAnimalsAndRarities()
+
+task.spawn(function()
+	tgDeleteWebhook()
+	tgSendGroup("🤖 Online. Listening here.\n🎛️ Rarity: " .. DESIRED_RARITY .. "\n📌 Use /add <name> to focus specific animals.\n📜 /addlist to manage.")
+	tgLog("📣 Logging channel connected.")
+	tgPoll()
+end)
+
+RunService.Heartbeat:Connect(function()
+	local c = getChar()
+	local hum = c.Humanoid
+	local hrp = c.HumanoidRootPart
+	local now = os.clock()
+	if hum.WalkSpeed < 2 then
+		hum.WalkSpeed = 16
+	end
+	if hum.Sit then
+		hum.Sit = false
+	end
+	if hrp.Anchored then
+		hrp.Anchored = false
+	end
+	if not targetModel or not targetModel.Parent then
+		if not holding.active then
+			targetModel = nil
+			targetPart = nil
+			targetPrompt = nil
+			waypoints = nil
+			wpIndex = 1
+			currentDest = nil
+			lastGoal = nil
+			clearMarkers()
+			acquireTarget()
+			if not targetModel then
+				if now - lastIdleJump > 1.6 then
+					hum.Jump = true
+					lastIdleJump = now
+				end
+			end
+		end
+		return
+	end
+	if not (targetPart and targetPart.Parent and targetPrompt and targetPrompt.Parent) then
+		if holding.active then
+			if holding.succeeded then
+				finishHoldSuccess()
+			else
+				stopHold(false)
+			end
+		else
+			targetModel = nil
+			targetPart = nil
+			targetPrompt = nil
+			waypoints = nil
+			wpIndex = 1
+			currentDest = nil
+			lastGoal = nil
+			clearMarkers()
+		end
+		return
+	end
+	if not holding.active and closeEnoughForHold(hrp, targetPart, targetPrompt) then
+		startHold(targetPrompt, targetModel)
+	end
+	if holding.active then
+		if holding.succeeded then
+			finishHoldSuccess()
+			return
+		end
+		if now - holding.lastReassert > 0.25 then
+			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+			holding.lastReassert = now
+		end
+		if now >= holding.deadline then
+			stopHold(true)
+		end
+	end
+	local goal = currentGoal()
+	if goal then
+		planPathIfNeeded()
+	end
+	if waypoints and waypoints[wpIndex] then
+		local newIdx = nearestIndexInWindow(waypoints, hrp.Position, wpIndex, WP_WINDOW)
+		if newIdx > wpIndex then
+			wpIndex = newIdx
+		end
+		local laIdx = lookaheadIndex(waypoints, wpIndex, LOOKAHEAD_DIST)
+		local dest = waypoints[laIdx].Position
+		if (not currentDest) or (dest - currentDest).Magnitude > 1.0 or (now - lastDestIssue) > MOVE_REFRESH then
+			currentDest = dest
+			hum:MoveTo(currentDest)
+			lastDestIssue = now
+		end
+		for i = wpIndex, laIdx do
+			if waypoints[i].Action == Enum.PathWaypointAction.Jump then
+				hum.Jump = true
+				break
+			end
+		end
+		if now - (lastProgressCheck or 0) > STUCK_REPLAN_SEC then
+			local pos = hrp.Position
+			if lastProgressPos and (pos - lastProgressPos).Magnitude < STUCK_DIST then
+				lastPlan = 0
+			end
+			lastProgressPos = pos
+			lastProgressCheck = now
+		end
+	else
+		local aim = targetPart.Position + Vector3.new(rng:NextNumber(-0.4, 0.4), 0, rng:NextNumber(-0.4, 0.4))
+		if (not currentDest) or (aim - currentDest).Magnitude > 1.0 or (now - lastDestIssue) > MOVE_REFRESH then
+			currentDest = aim
+			hum:MoveTo(currentDest)
+			lastDestIssue = now
+		end
+	end
+end)
