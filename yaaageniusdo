@@ -13,7 +13,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local http = (syn and (syn.request or syn.requests)) or request or requests or http_request
 assert(http, "No supported HTTP request function found (syn.request/request/requests/http_request).")
 
--- Remote file that returns animals table directly (your snippet style)
 local REMOTE_DATA_URLS = {
 	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/refs/heads/main/yaaageniusdo",
 	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/main/yaaageniusdo",
