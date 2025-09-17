@@ -13,6 +13,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local http = (syn and (syn.request or syn.requests)) or request or requests or http_request
 assert(http, "No supported HTTP request function found (syn.request/request/requests/http_request).")
 
+-- Remote file that returns animals table directly (your snippet style)
+local REMOTE_DATA_URLS = {
+	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/refs/heads/main/yaaageniusdo",
+	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/main/yaaageniusdo",
+}
+
 local DESIRED_RARITY = "Secret"
 local FocusAnimals = {}
 local DisplayToKeys = {}
@@ -102,19 +108,127 @@ local function safeRequire(m)
 	end
 end
 
+-- remote loader helpers
+local function httpGet(url)
+	local ok, resp = pcall(function()
+		return http({ Url = url, Method = "GET" })
+	end)
+	if not ok or not resp or resp.StatusCode ~= 200 or not resp.Body then
+		return false, resp and resp.StatusCode, resp and resp.Body
+	end
+	return true, resp.Body
+end
+
+local function tryLoadstring(src)
+	local lf = loadstring or load
+	if not lf then
+		return nil, "loadstring not available"
+	end
+	local fn, err = lf(src)
+	if not fn then
+		return nil, "compile error: " .. tostring(err)
+	end
+	local ok, result = pcall(fn)
+	if not ok then
+		return nil, "runtime error: " .. tostring(result)
+	end
+	return result
+end
+
+local function looksLikeAnimalsTable(t)
+	if type(t) ~= "table" then
+		return false
+	end
+	local n = 0
+	for k, v in pairs(t) do
+		if type(k) == "string" and type(v) == "table" then
+			if v.DisplayName or v.Rarity or v.Price or v.Generation or v.RoadWeight then
+				return true
+			end
+			n = n + 1
+			if n > 40 then
+				break
+			end
+		end
+	end
+	return false
+end
+
+-- Loads from remote via loadstring; handles when the remote returns the animals table directly
 local function loadAnimalsAndRarities()
-	local datas = ReplicatedStorage:WaitForChild("Datas")
-	RaritiesOrder = safeRequire(datas:FindFirstChild("Rarities"))
-	local animalsMod = datas:FindFirstChild("Animals")
-	AnimalsTable = (animalsMod and safeRequire(animalsMod)) or {}
+	AnimalsTable = {}
+	RaritiesOrder = nil
 	DisplayToKeys = {}
+
+	local lastErr = "unknown"
+	local body
+	local usedUrl = "?"
+	for _, url in ipairs(REMOTE_DATA_URLS) do
+		local ok, b, extra = httpGet(url)
+		if ok then
+			body = b
+			usedUrl = url
+			break
+		else
+			lastErr = tostring(extra or b)
+		end
+	end
+	if not body then
+		tgLog("⚠️ Failed to fetch remote data: " .. tostring(lastErr))
+		return
+	end
+
+	local data, err = tryLoadstring(body)
+	if not data then
+		tgLog("⚠️ loadstring failed: " .. tostring(err))
+		return
+	end
+
+	-- Accept multiple shapes:
+	-- 1) data is animals table directly (your file style)
+	-- 2) data.AnimalsTable / data.Animals / data.animals
+	local animals
+	if looksLikeAnimalsTable(data) then
+		animals = data
+	else
+		animals = data.AnimalsTable or data.Animals or data.animals
+	end
+	if type(animals) ~= "table" then
+		animals = {}
+	end
+	AnimalsTable = animals
+
+	-- Try to get rarities order from data if present; otherwise fallback to in-game module (optional)
+	local rarities = (type(data) == "table" and (data.RaritiesOrder or data.Rarities or data.rarities)) or nil
+	if type(rarities) == "table" then
+		RaritiesOrder = rarities
+	else
+		local datas = ReplicatedStorage:FindFirstChild("Datas")
+		if datas then
+			RaritiesOrder = safeRequire(datas:FindFirstChild("Rarities"))
+		end
+	end
+
 	for key, info in pairs(AnimalsTable) do
-		local disp = tostring(info.DisplayName or key)
+		local disp = tostring((type(info) == "table" and info.DisplayName) or key)
 		if not DisplayToKeys[disp] then
 			DisplayToKeys[disp] = {}
 		end
 		DisplayToKeys[disp][key] = true
 	end
+
+	-- Small summary to confirm it loaded
+	local count = 0
+	local raritySet = {}
+	for _, inf in pairs(AnimalsTable) do
+		count += 1
+		if type(inf) == "table" and type(inf.Rarity) == "string" and inf.Rarity ~= "" then
+			raritySet[inf.Rarity] = true
+		end
+	end
+	local uniqR = 0
+	for _ in pairs(raritySet) do uniqR += 1 end
+	tgLog(string.format("✅ Remote loaded (%s)\nAnimals: %d | Rarities: %d", usedUrl, count, uniqR))
 end
 
 local function collectAllRarities()
@@ -206,6 +320,10 @@ local function rarityKeyboard(selected)
 	end
 	if #row > 0 then
 		table.insert(board, row)
+	end
+	-- If nothing loaded yet, show a tiny hint button so there's at least something
+	if #board == 0 then
+		board = { { { text = "No rarities loaded yet", callback_data = "noop" } } }
 	end
 	return { inline_keyboard = board }
 end
@@ -738,7 +856,7 @@ local function tgPoll()
 								DESIRED_RARITY = rset
 								tgAnswerCallbackQuery(cq.id, "Set: " .. rset)
 								if mid then
-                                    tgEditReplyMarkup(GROUP_CHAT_ID, mid, rarityKeyboard(DESIRED_RARITY))
+									tgEditReplyMarkup(GROUP_CHAT_ID, mid, rarityKeyboard(DESIRED_RARITY))
 								end
 								tgSendGroup("🎛️ Rarity filter set to: " .. DESIRED_RARITY)
 							elseif addk then
