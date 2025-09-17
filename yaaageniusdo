@@ -14,8 +14,7 @@ local http = (syn and (syn.request or syn.requests)) or request or requests or h
 assert(http, "No supported HTTP request function found (syn.request/request/requests/http_request).")
 
 local REMOTE_DATA_URLS = {
-	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/refs/heads/main/yaaageniusdo",
-	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/main/yaaageniusdo",
+	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/refs/heads/main/stuff"
 }
 
 local DESIRED_RARITY = "Rare"
