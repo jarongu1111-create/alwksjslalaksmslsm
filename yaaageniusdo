@@ -18,7 +18,7 @@ local REMOTE_DATA_URLS = {
 	"https://raw.githubusercontent.com/jarongu1111-create/alwksjslalaksmslsm/main/yaaageniusdo",
 }
 
-local DESIRED_RARITY = "Secret"
+local DESIRED_RARITY = "Rare"
 local FocusAnimals = {}
 local DisplayToKeys = {}
 local AnimalsTable = {}
